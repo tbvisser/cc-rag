@@ -32,7 +32,7 @@ RAG app with chat (default) and document ingestion interfaces. Config via env va
 ## Development Flow
 1. **Plan** - Create a detailed plan and save it to `.agent/plans/`
 2. **Build** - Execute the plan to implement the feature
-3. **Validate** - Test and verify the implementation works correctly
+3. **Validate** - Test and verify the implementation works correctly. Use browser testing where applicable via an appropriate MCP
 4. **Iterate** - Fix any issues found during validation
 
 ## Progress
