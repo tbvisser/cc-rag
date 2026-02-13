@@ -1,10 +1,9 @@
-import { useState, useCallback, useEffect } from 'react'
+import { useState, useCallback, useEffect, useRef } from 'react'
 import { useAuth } from '@/contexts/AuthContext'
 import { apiFetch, apiStreamUrl } from '@/lib/api'
 import { useSSE } from './useSSE'
-import type { SSESource } from './useSSE'
-import type { Thread } from '@/components/layout/Sidebar'
-import type { Message } from '@/components/chat/MessageList'
+import type { SSESource, SSEImageRef } from './useSSE'
+import type { Thread, Message, Attachment } from '@/types/chat'
 
 interface ThreadWithMessages {
   id: string
@@ -19,10 +18,13 @@ export function useChat() {
   const [messages, setMessages] = useState<Message[]>([])
   const [streamingContent, setStreamingContent] = useState('')
   const [streamingSources, setStreamingSources] = useState<SSESource[]>([])
+  const [streamingImages, setStreamingImages] = useState<SSEImageRef[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const { startStream, stopStream, isStreaming } = useSSE()
+  const fetchIdRef = useRef(0)
+  const streamingImagesRef = useRef<SSEImageRef[]>([])
 
   const token = session?.access_token
 
@@ -41,26 +43,38 @@ export function useChat() {
     async (threadId: string) => {
       if (!token) return
 
+      stopStream()
+      setMessages([])
+      setStreamingContent('')
+      setStreamingSources([])
+      setStreamingImages([])
       setLoading(true)
+
+      const fetchId = ++fetchIdRef.current
+
       try {
         const data = await apiFetch<ThreadWithMessages>(
           `/api/threads/${threadId}`,
           {},
           token
         )
+        if (fetchId !== fetchIdRef.current) return // stale (StrictMode double-invoke)
         setMessages(data.messages)
         setActiveThreadId(threadId)
       } catch (err) {
+        if (fetchId !== fetchIdRef.current) return
         setError(err instanceof Error ? err.message : 'Failed to fetch thread')
       } finally {
-        setLoading(false)
+        if (fetchId === fetchIdRef.current) {
+          setLoading(false)
+        }
       }
     },
-    [token]
+    [token, stopStream]
   )
 
-  const createThread = useCallback(async () => {
-    if (!token) return
+  const createThread = useCallback(async (): Promise<string | undefined> => {
+    if (!token) return undefined
 
     setLoading(true)
     try {
@@ -72,8 +86,10 @@ export function useChat() {
       await fetchThreads()
       setActiveThreadId(data.id)
       setMessages([])
+      return data.id
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create thread')
+      return undefined
     } finally {
       setLoading(false)
     }
@@ -98,24 +114,26 @@ export function useChat() {
   )
 
   const sendMessage = useCallback(
-    async (content: string) => {
+    async (content: string, attachments?: Attachment[]) => {
       if (!token || !activeThreadId) return
 
       const userMessage: Message = {
         id: `temp-${Date.now()}`,
         role: 'user',
         content,
+        attachments,
         created_at: new Date().toISOString(),
       }
       setMessages((prev) => [...prev, userMessage])
       setStreamingContent('')
       setStreamingSources([])
+      setStreamingImages([])
 
       const url = apiStreamUrl(`/api/threads/${activeThreadId}/messages`)
 
       await startStream(
         url,
-        { content },
+        { content, attachments },
         token,
         {
           onMessage: (data) => {
@@ -124,16 +142,29 @@ export function useChat() {
           onSources: (sources) => {
             setStreamingSources(sources)
           },
+          onImages: (images) => {
+            setStreamingImages(images)
+            streamingImagesRef.current = images
+          },
           onError: (err) => {
             setError(err.message)
           },
           onComplete: () => {
+            // Capture ref value before clearing — the setState updater runs
+            // later during render, so the ref would already be empty by then.
+            const capturedImages = streamingImagesRef.current
             setStreamingContent((prev) => {
               if (prev) {
+                const imageAttachments: Attachment[] = capturedImages.map((img) => ({
+                  type: 'document_image',
+                  url: img.url,
+                  alt: img.alt,
+                }))
                 const assistantMessage: Message = {
                   id: `assistant-${Date.now()}`,
                   role: 'assistant',
                   content: prev,
+                  attachments: imageAttachments.length > 0 ? imageAttachments : undefined,
                   created_at: new Date().toISOString(),
                 }
                 setMessages((msgs) => [...msgs, assistantMessage])
@@ -141,6 +172,8 @@ export function useChat() {
               return ''
             })
             setStreamingSources([])
+            setStreamingImages([])
+            streamingImagesRef.current = []
             fetchThreads() // Refresh to get updated title
           },
         }
@@ -159,6 +192,7 @@ export function useChat() {
     messages,
     streamingContent,
     streamingSources,
+    streamingImages,
     loading,
     error,
     isStreaming,

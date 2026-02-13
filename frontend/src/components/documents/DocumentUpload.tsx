@@ -14,6 +14,8 @@ const ACCEPTED_TYPES = [
   'text/csv',
   'application/pdf',
   'application/json',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'text/html',
 ]
 
 export function DocumentUpload({ onUpload, uploading }: DocumentUploadProps) {
@@ -23,7 +25,7 @@ export function DocumentUpload({ onUpload, uploading }: DocumentUploadProps) {
   const handleFile = useCallback(
     (file: File) => {
       if (!ACCEPTED_TYPES.includes(file.type)) {
-        alert(`File type "${file.type || 'unknown'}" is not supported.\nSupported: .txt, .md, .csv, .pdf, .json`)
+        alert(`File type "${file.type || 'unknown'}" is not supported.\nSupported: .txt, .md, .csv, .pdf, .json, .docx, .html`)
         return
       }
       onUpload(file)
@@ -76,7 +78,7 @@ export function DocumentUpload({ onUpload, uploading }: DocumentUploadProps) {
       <input
         ref={inputRef}
         type="file"
-        accept=".txt,.md,.csv,.pdf,.json"
+        accept=".txt,.md,.csv,.pdf,.json,.docx,.html,.htm"
         onChange={handleInputChange}
         className="hidden"
       />
@@ -99,7 +101,7 @@ export function DocumentUpload({ onUpload, uploading }: DocumentUploadProps) {
             {dragActive ? 'Drop file here' : 'Drag & drop a file here'}
           </p>
           <p className="mt-1 text-xs text-muted-foreground">
-            .txt, .md, .csv, .pdf, .json (max 50MB)
+            .txt, .md, .csv, .pdf, .json, .docx, .html (max 50MB)
           </p>
           <Button
             variant="outline"

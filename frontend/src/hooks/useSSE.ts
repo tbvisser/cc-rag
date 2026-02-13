@@ -5,9 +5,18 @@ export interface SSESource {
   similarity: number
 }
 
+export interface SSEImageRef {
+  url: string
+  alt: string
+  doc_id: string
+  index: number
+  page?: number
+}
+
 interface UseSSEOptions {
   onMessage: (data: string) => void
   onSources?: (sources: SSESource[]) => void
+  onImages?: (images: SSEImageRef[]) => void
   onError?: (error: Error) => void
   onComplete?: () => void
 }
@@ -48,6 +57,7 @@ export function useSSE() {
 
         const decoder = new TextDecoder()
         let buffer = ''
+        let completed = false
 
         while (true) {
           const { done, value } = await reader.read()
@@ -59,13 +69,16 @@ export function useSSE() {
 
           for (const line of lines) {
             if (line.startsWith('data: ')) {
-              const data = line.slice(6)
+              const data = line.slice(6).trim()
               if (data === '[DONE]') {
+                completed = true
                 options.onComplete?.()
               } else {
                 try {
                   const parsed = JSON.parse(data)
-                  if (parsed.sources) {
+                  if (parsed.images) {
+                    options.onImages?.(parsed.images)
+                  } else if (parsed.sources) {
                     options.onSources?.(parsed.sources)
                   } else if (parsed.content) {
                     options.onMessage(parsed.content)
@@ -79,7 +92,30 @@ export function useSSE() {
           }
         }
 
-        options.onComplete?.()
+        // Flush any remaining buffer (partial line without trailing newline)
+        if (buffer.trim().startsWith('data: ')) {
+          const data = buffer.trim().slice(6).trim()
+          if (data === '[DONE]') {
+            completed = true
+          } else if (data) {
+            try {
+              const parsed = JSON.parse(data)
+              if (parsed.images) {
+                options.onImages?.(parsed.images)
+              } else if (parsed.sources) {
+                options.onSources?.(parsed.sources)
+              } else if (parsed.content) {
+                options.onMessage(parsed.content)
+              }
+            } catch {
+              options.onMessage(data)
+            }
+          }
+        }
+
+        if (!completed) {
+          options.onComplete?.()
+        }
       } catch (error) {
         if (error instanceof Error && error.name !== 'AbortError') {
           options.onError?.(error)

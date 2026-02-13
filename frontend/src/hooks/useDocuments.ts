@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect } from 'react'
 import { useAuth } from '@/contexts/AuthContext'
-import { apiFetch } from '@/lib/api'
+import { apiFetch, reingestDocument as apiReingest } from '@/lib/api'
 import { useDocumentStatus } from './useDocumentStatus'
 
 export interface Document {
@@ -13,6 +13,15 @@ export interface Document {
   status: 'pending' | 'processing' | 'completed' | 'failed'
   error_message: string | null
   chunk_count: number | null
+  content_hash: string | null
+  metadata: {
+    title?: string
+    summary?: string
+    topics?: string[]
+    document_type?: string
+    language?: string
+    key_entities?: string[]
+  } | null
   created_at: string
   updated_at: string
 }
@@ -65,6 +74,10 @@ export function useDocuments() {
           throw new Error(err.detail || 'Upload failed')
         }
 
+        if (response.headers.get('X-Duplicate') === 'true') {
+          setError('This document has already been uploaded.')
+        }
+
         await fetchDocuments()
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to upload document')
@@ -89,6 +102,21 @@ export function useDocuments() {
     [token]
   )
 
+  const reingestDocument = useCallback(
+    async (documentId: string) => {
+      if (!token) return
+
+      try {
+        await apiReingest(documentId, token)
+        // Refresh to pick up the status change to "pending"
+        await fetchDocuments()
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Failed to re-ingest document')
+      }
+    },
+    [token, fetchDocuments]
+  )
+
   const handleDocumentUpdate = useCallback((updated: Document) => {
     setDocuments((prev) =>
       prev.map((doc) =>
@@ -110,6 +138,7 @@ export function useDocuments() {
     error,
     uploadDocument,
     deleteDocument,
+    reingestDocument,
     refreshDocuments: fetchDocuments,
     clearError: () => setError(null),
   }

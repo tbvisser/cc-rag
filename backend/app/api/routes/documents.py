@@ -1,5 +1,6 @@
 import uuid
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File, status
+from fastapi.responses import JSONResponse, Response
 
 from app.api.middleware.auth import get_current_user, TokenPayload
 from app.models.document import DocumentResponse
@@ -7,6 +8,7 @@ from app.services.supabase_service import SupabaseService, get_supabase_service
 from app.services.storage_service import StorageService, get_storage_service
 from app.services.embedding_service import EmbeddingService, get_embedding_service
 from app.services.ingestion_service import process_document
+from app.services.hashing_service import compute_content_hash
 
 router = APIRouter()
 
@@ -16,6 +18,8 @@ ALLOWED_TYPES = {
     "text/csv": ".csv",
     "application/pdf": ".pdf",
     "application/json": ".json",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    "text/html": ".html",
 }
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
 
@@ -52,6 +56,15 @@ async def upload_document(
             detail="File is empty.",
         )
 
+    # Check for duplicate content
+    content_hash = compute_content_hash(content)
+    existing = await supabase.get_document_by_hash(user.sub, content_hash)
+    if existing:
+        return JSONResponse(
+            content=DocumentResponse(**existing).model_dump(mode="json"),
+            headers={"X-Duplicate": "true"},
+        )
+
     # Generate unique filename to avoid collisions
     original_name = file.filename or "untitled"
     unique_name = f"{uuid.uuid4().hex[:8]}_{original_name}"
@@ -72,6 +85,7 @@ async def upload_document(
         file_type=content_type,
         file_size=file_size,
         storage_path=storage_path,
+        content_hash=content_hash,
     )
 
     # Trigger background ingestion: chunk → embed → store
@@ -127,11 +141,78 @@ async def delete_document(
             detail="Document not found",
         )
 
-    # Delete chunks first (foreign key constraint)
-    await supabase.delete_chunks_by_document(document_id)
-
-    # Delete file from storage
+    # Delete file from storage first (needs storage_path from fetched doc)
     await storage.delete_file(document["storage_path"])
 
-    # Delete document record
+    # Delete document record (chunks removed automatically via ON DELETE CASCADE)
     await supabase.delete_document(document_id, user.sub)
+
+
+@router.post("/documents/{document_id}/reingest", status_code=status.HTTP_202_ACCEPTED)
+async def reingest_document(
+    document_id: str,
+    background_tasks: BackgroundTasks,
+    user: TokenPayload = Depends(get_current_user),
+    supabase: SupabaseService = Depends(get_supabase_service),
+    storage: StorageService = Depends(get_storage_service),
+    embedding_service: EmbeddingService = Depends(get_embedding_service),
+):
+    """Re-process an existing document (re-extract text, images, chunks)."""
+    document = await supabase.get_document(document_id, user.sub)
+    if not document:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found",
+        )
+
+    # Delete existing chunks so process_document recreates them
+    await supabase.delete_chunks_by_document(document_id)
+
+    # Reset status to pending, clear any previous error and chunk count
+    await supabase.update_document_status(
+        document_id, "pending", clear_error=True, reset_chunk_count=True
+    )
+
+    # Re-run the full ingestion pipeline in the background
+    background_tasks.add_task(
+        process_document,
+        document_id=document_id,
+        storage=storage,
+        supabase=supabase,
+        embedding_service=embedding_service,
+    )
+
+    return {"detail": "Re-ingestion started", "document_id": document_id}
+
+
+@router.get("/documents/{document_id}/images/{image_index}")
+async def get_document_image(
+    document_id: str,
+    image_index: int,
+    user: TokenPayload = Depends(get_current_user),
+    supabase: SupabaseService = Depends(get_supabase_service),
+    storage: StorageService = Depends(get_storage_service),
+):
+    """Serve an extracted image from a document."""
+    document = await supabase.get_document(document_id, user.sub)
+    if not document:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found",
+        )
+
+    images = (document.get("metadata") or {}).get("images", [])
+    target = None
+    for img in images:
+        if img.get("index") == image_index:
+            target = img
+            break
+
+    if not target:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Image index {image_index} not found",
+        )
+
+    content = await storage.download_image(target["storage_path"])
+    return Response(content=content, media_type="image/png")

@@ -26,6 +26,18 @@ class Settings(BaseSettings):
     chunk_size: int = 1000
     chunk_overlap: int = 200
 
+    # Hybrid Search
+    search_mode: str = "hybrid"  # "vector" | "keyword" | "hybrid"
+    hybrid_alpha: float = 0.5  # 0.0 = keyword only, 1.0 = vector only
+    rrf_k: int = 60  # RRF constant
+    hybrid_candidate_limit: int = 20  # candidates per search type before fusion
+
+    # Reranking (Cohere)
+    rerank_enabled: bool = False
+    rerank_api_key: str = ""
+    rerank_model: str = "rerank-v3.5"
+    rerank_top_n: int = 5
+
     # Observability
     langsmith_api_key: str = ""
     langsmith_endpoint: str = "https://eu.api.smith.langchain.com"

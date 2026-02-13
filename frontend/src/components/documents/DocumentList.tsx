@@ -1,10 +1,11 @@
-import { FileText, Trash2, Loader2, CheckCircle2, XCircle, Clock } from 'lucide-react'
+import { FileText, Trash2, Loader2, CheckCircle2, XCircle, Clock, RotateCw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import type { Document } from '@/hooks/useDocuments'
 
 interface DocumentListProps {
   documents: Document[]
   onDelete: (documentId: string) => void
+  onReingest?: (documentId: string) => void
 }
 
 function formatFileSize(bytes: number): string {
@@ -49,7 +50,7 @@ function StatusBadge({ status, errorMessage }: { status: Document['status']; err
   }
 }
 
-export function DocumentList({ documents, onDelete }: DocumentListProps) {
+export function DocumentList({ documents, onDelete, onReingest }: DocumentListProps) {
   if (documents.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center py-12 text-center">
@@ -86,8 +87,41 @@ export function DocumentList({ documents, onDelete }: DocumentListProps) {
                 </span>
               )}
             </div>
+            {doc.status === 'completed' && doc.metadata?.summary && (
+              <p className="mt-1 text-xs text-muted-foreground line-clamp-2">
+                {doc.metadata.summary}
+              </p>
+            )}
+            {doc.status === 'completed' && doc.metadata && (
+              <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                {doc.metadata.document_type && (
+                  <span className="inline-flex items-center rounded-full bg-blue-100 px-2 py-0.5 text-[10px] font-medium text-blue-700 dark:bg-blue-900/30 dark:text-blue-400">
+                    {doc.metadata.document_type}
+                  </span>
+                )}
+                {doc.metadata.topics?.slice(0, 3).map((topic) => (
+                  <span
+                    key={topic}
+                    className="inline-flex items-center rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-medium text-gray-600 dark:bg-gray-800 dark:text-gray-400"
+                  >
+                    {topic}
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
           <StatusBadge status={doc.status} errorMessage={doc.error_message} />
+          {onReingest && (doc.status === 'completed' || doc.status === 'failed') && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8 opacity-0 transition-opacity group-hover:opacity-100"
+              title="Re-process document"
+              onClick={() => onReingest(doc.id)}
+            >
+              <RotateCw className="h-4 w-4 text-muted-foreground hover:text-blue-500" />
+            </Button>
+          )}
           <Button
             variant="ghost"
             size="icon"

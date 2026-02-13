@@ -103,16 +103,16 @@ class SupabaseService:
         thread_id: str,
         role: str,
         content: str,
+        attachments: list[dict] | None = None,
     ) -> dict:
-        result = await self._request(
-            "POST",
-            "messages",
-            json={
-                "thread_id": thread_id,
-                "role": role,
-                "content": content,
-            },
-        )
+        payload = {
+            "thread_id": thread_id,
+            "role": role,
+            "content": content,
+        }
+        if attachments:
+            payload["attachments"] = attachments
+        result = await self._request("POST", "messages", json=payload)
         return result[0] if isinstance(result, list) else result
 
     async def get_messages(self, thread_id: str) -> list[dict]:
@@ -122,6 +122,7 @@ class SupabaseService:
             params={
                 "thread_id": f"eq.{thread_id}",
                 "order": "created_at.asc",
+                "select": "id,thread_id,role,content,attachments,created_at",
             },
         )
         return result if isinstance(result, list) else []
@@ -135,20 +136,33 @@ class SupabaseService:
         file_type: str,
         file_size: int,
         storage_path: str,
+        content_hash: str | None = None,
     ) -> dict:
+        payload = {
+            "user_id": user_id,
+            "filename": filename,
+            "file_type": file_type,
+            "file_size": file_size,
+            "storage_path": storage_path,
+            "status": "pending",
+        }
+        if content_hash is not None:
+            payload["content_hash"] = content_hash
+        result = await self._request("POST", "documents", json=payload)
+        return result[0] if isinstance(result, list) else result
+
+    async def get_document_by_hash(self, user_id: str, content_hash: str) -> dict | None:
         result = await self._request(
-            "POST",
+            "GET",
             "documents",
-            json={
-                "user_id": user_id,
-                "filename": filename,
-                "file_type": file_type,
-                "file_size": file_size,
-                "storage_path": storage_path,
-                "status": "pending",
+            params={
+                "user_id": f"eq.{user_id}",
+                "content_hash": f"eq.{content_hash}",
             },
         )
-        return result[0] if isinstance(result, list) else result
+        if isinstance(result, list) and len(result) > 0:
+            return result[0]
+        return None
 
     async def get_documents(self, user_id: str) -> list[dict]:
         result = await self._request(
@@ -180,18 +194,39 @@ class SupabaseService:
         status: str,
         error_message: str | None = None,
         chunk_count: int | None = None,
+        clear_error: bool = False,
+        reset_chunk_count: bool = False,
     ) -> dict | None:
-        data = {"status": status, "updated_at": "now()"}
+        data = {"status": status}
         if error_message is not None:
             data["error_message"] = error_message
+        elif clear_error:
+            data["error_message"] = None
         if chunk_count is not None:
             data["chunk_count"] = chunk_count
+        elif reset_chunk_count:
+            data["chunk_count"] = None
 
         result = await self._request(
             "PATCH",
             "documents",
             params={"id": f"eq.{document_id}"},
             json=data,
+        )
+        if isinstance(result, list) and len(result) > 0:
+            return result[0]
+        return None
+
+    async def update_document_metadata(
+        self,
+        document_id: str,
+        metadata: dict,
+    ) -> dict | None:
+        result = await self._request(
+            "PATCH",
+            "documents",
+            params={"id": f"eq.{document_id}"},
+            json={"metadata": metadata},
         )
         if isinstance(result, list) and len(result) > 0:
             return result[0]
@@ -236,6 +271,7 @@ class SupabaseService:
         embedding: list[float],
         limit: int = 5,
         threshold: float = 0.7,
+        filter_metadata: dict | None = None,
     ) -> list[dict]:
         """
         Vector similarity search for relevant chunks.
@@ -244,17 +280,50 @@ class SupabaseService:
         """
         settings = get_settings()
 
+        payload = {
+            "query_embedding": embedding,
+            "match_count": limit,
+            "match_threshold": threshold,
+            "filter_user_id": user_id,
+        }
+        if filter_metadata is not None:
+            payload["filter_metadata"] = filter_metadata
+
         # Use RPC endpoint for vector search
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 f"{settings.supabase_url}/rest/v1/rpc/search_chunks",
                 headers=self.headers,
-                json={
-                    "query_embedding": embedding,
-                    "match_count": limit,
-                    "match_threshold": threshold,
-                    "filter_user_id": user_id,
-                },
+                json=payload,
+            )
+            response.raise_for_status()
+            return response.json()
+
+
+    async def search_chunks_keyword(
+        self,
+        user_id: str,
+        query_text: str,
+        limit: int = 20,
+    ) -> list[dict]:
+        """
+        Full-text keyword search for relevant chunks.
+
+        Uses Supabase's RPC to call a postgres function for keyword (FTS) search.
+        """
+        settings = get_settings()
+
+        payload = {
+            "query_text": query_text,
+            "match_count": limit,
+            "filter_user_id": user_id,
+        }
+
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{settings.supabase_url}/rest/v1/rpc/search_chunks_keyword",
+                headers=self.headers,
+                json=payload,
             )
             response.raise_for_status()
             return response.json()
