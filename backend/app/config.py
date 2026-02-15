@@ -38,6 +38,9 @@ class Settings(BaseSettings):
     rerank_model: str = "rerank-v3.5"
     rerank_top_n: int = 5
 
+    # Web Search (Tavily)
+    tavily_api_key: str = ""
+
     # Observability
     langsmith_api_key: str = ""
     langsmith_endpoint: str = "https://eu.api.smith.langchain.com"

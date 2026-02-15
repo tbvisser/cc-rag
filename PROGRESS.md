@@ -111,14 +111,45 @@ Track your progress through the masterclass. Update this file as you complete mo
 - Run `005_hybrid_search.sql` migration in Supabase SQL editor before testing
 
 ### Module 7: Additional Tools
-- [ ] Text-to-SQL tool
-- [ ] Web search fallback
+- [x] Agentic tool-calling loop (LLM decides which tools to use)
+- [x] Tool definitions (retrieve_documents, text_to_sql, web_search)
+- [x] Agent service orchestrator with max 5 rounds
+- [x] Text-to-SQL tool (LLM generates SELECT, executes via Supabase RPC)
+- [x] Web search tool (Tavily API via raw httpx)
+- [x] Chat endpoint refactored from hard-coded retrieval to agent loop
+- [x] Frontend: SSE tool_call/tool_result events, ToolCallCard UI
+- [x] Settings: Tavily API key configuration
 
-**Status:** Not started.
+**Status:** ✅ Complete.
+
+**Validated:**
+- Document retrieval tool: ask about uploaded docs → `retrieve_documents` tool called, sources appear, response cites them
+- Text-to-SQL: ask "how many documents have I uploaded?" → `text_to_sql` tool called, SQL generated and executed
+- Web search: Tavily key configured, ask about current events → `web_search` tool called, web sources returned
+- No tools needed: simple questions get direct responses without tool calls
+- ToolCallCard UI: collapsible cards show tool name, arguments, and results during streaming
+
+**Notes:**
+- LLM autonomously chooses tools via OpenAI function-calling format
+- Agent loop: non-streaming tool calls → execute → feed back → stream final answer
+- Text-to-SQL uses `execute_readonly_sql` Supabase RPC (SECURITY DEFINER, SELECT-only)
+- Web search only enabled when Tavily API key is configured
+- Run `007_text_to_sql.sql` migration in Supabase SQL editor before testing
 
 ### Module 8: Sub-Agents
-- [ ] Detect full-document scenarios
-- [ ] Spawn isolated sub-agent
-- [ ] Nested tool call display in UI
+- [x] `analyze_document` tool definition (filename + question params)
+- [x] DB helpers: `get_document_by_filename`, `get_chunks_by_document`
+- [x] `SubAgentEvent` wrapper + `_execute_analyze_document` async generator
+- [x] Sub-agent reuses `run_agent_loop` with full document in system prompt
+- [x] SSE serialization for `sub_agent_event` (tool_call, tool_result, content)
+- [x] Frontend: `onSubAgentEvent` callback in useSSE + useChat state extension
+- [x] Nested sub-agent UI in ToolCallCard (recursive rendering, markdown content)
 
-**Status:** Not started.
+**Status:** ✅ Complete.
+
+**Notes:**
+- Sub-agent spawned via recursive `run_agent_loop` call with document-scoped context
+- Full document text assembled from chunks and placed in sub-agent system prompt (80K char limit)
+- Sub-agent's `retrieve_documents` calls are scoped to the target document via `metadata_filter`
+- `SubAgentEvent` wrapper cleanly separates sub-agent events from main agent events at SSE layer
+- ToolCallCard renders sub-agent activity (nested tool calls + streaming markdown) inline

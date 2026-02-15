@@ -242,6 +242,36 @@ class SupabaseService:
             },
         )
 
+    async def get_document_by_filename(self, user_id: str, filename: str) -> dict | None:
+        """Find a completed document by filename."""
+        result = await self._request(
+            "GET",
+            "documents",
+            params={
+                "user_id": f"eq.{user_id}",
+                "filename": f"eq.{filename}",
+                "status": "eq.completed",
+                "order": "created_at.desc",
+                "limit": "1",
+            },
+        )
+        if isinstance(result, list) and len(result) > 0:
+            return result[0]
+        return None
+
+    async def get_chunks_by_document(self, document_id: str) -> list[dict]:
+        """Fetch all chunks for a document ordered by chunk_index."""
+        result = await self._request(
+            "GET",
+            "chunks",
+            params={
+                "document_id": f"eq.{document_id}",
+                "order": "chunk_index.asc",
+                "select": "id,document_id,content,chunk_index,metadata",
+            },
+        )
+        return result if isinstance(result, list) else []
+
     # ==================== Chunks ====================
 
     async def create_chunks(self, chunks: list[dict]) -> list[dict]:

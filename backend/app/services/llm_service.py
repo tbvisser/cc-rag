@@ -1,6 +1,7 @@
 import os
 from typing import AsyncGenerator
 from openai import OpenAI
+from openai.types.chat import ChatCompletionMessage
 from app.config import get_settings
 
 
@@ -44,6 +45,7 @@ class LLMService:
         self,
         messages: list[dict],
         system_prompt: str | None = None,
+        tools: list[dict] | None = None,
     ) -> AsyncGenerator[str, None]:
         """
         Stream a chat completion response.
@@ -51,6 +53,7 @@ class LLMService:
         Args:
             messages: List of message dicts with 'role' and 'content'
             system_prompt: Optional system prompt to prepend
+            tools: Optional list of tool schemas (OpenAI function-calling format)
         """
         chat_messages = []
 
@@ -59,15 +62,48 @@ class LLMService:
 
         chat_messages.extend(messages)
 
-        stream = self.client.chat.completions.create(
-            model=self.model,
-            messages=chat_messages,
-            stream=True,
-        )
+        kwargs: dict = {
+            "model": self.model,
+            "messages": chat_messages,
+            "stream": True,
+        }
+        if tools:
+            kwargs["tools"] = tools
+
+        stream = self.client.chat.completions.create(**kwargs)
 
         for chunk in stream:
             if chunk.choices and chunk.choices[0].delta.content:
                 yield chunk.choices[0].delta.content
+
+    def chat_completion_with_tools(
+        self,
+        messages: list[dict],
+        system_prompt: str | None = None,
+        tools: list[dict] | None = None,
+    ) -> ChatCompletionMessage:
+        """
+        Non-streaming chat completion that may return tool_calls.
+
+        Returns the raw ChatCompletionMessage so the caller can inspect
+        tool_calls and decide whether to execute them.
+        """
+        chat_messages = []
+
+        if system_prompt:
+            chat_messages.append({"role": "system", "content": system_prompt})
+
+        chat_messages.extend(messages)
+
+        kwargs: dict = {
+            "model": self.model,
+            "messages": chat_messages,
+        }
+        if tools:
+            kwargs["tools"] = tools
+
+        response = self.client.chat.completions.create(**kwargs)
+        return response.choices[0].message
 
     def chat_completion(
         self,

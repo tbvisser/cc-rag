@@ -33,6 +33,7 @@ export default function ChatView() {
     streamingContent,
     streamingSources,
     streamingImages,
+    streamingToolSteps,
     loading,
     error,
     isStreaming,
@@ -115,6 +116,7 @@ export default function ChatView() {
             streamingContent={streamingContent}
             streamingSources={streamingSources}
             streamingImages={streamingImages}
+            streamingToolSteps={streamingToolSteps}
             isStreaming={isStreaming}
             userInitials={userInitials}
           />

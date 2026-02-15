@@ -39,10 +39,15 @@ class RetrievalConfig(BaseModel):
         return max(0.0, min(1.0, v))
 
 
+class ToolsConfig(BaseModel):
+    tavily_api_key: str = ""
+
+
 class UserSettings(BaseModel):
     llm: LLMConfig = LLMConfig()
     embedding: EmbeddingConfig = EmbeddingConfig()
     retrieval: RetrievalConfig = RetrievalConfig()
+    tools: ToolsConfig = ToolsConfig()
 
 
 def _load_settings() -> UserSettings:
@@ -76,6 +81,9 @@ def _load_settings() -> UserSettings:
             rerank_enabled=fresh.rerank_enabled,
             rerank_api_key=fresh.rerank_api_key,
             rerank_model=fresh.rerank_model,
+        ),
+        tools=ToolsConfig(
+            tavily_api_key=fresh.tavily_api_key,
         ),
     )
 
@@ -122,6 +130,10 @@ def _apply_settings(user_settings: UserSettings) -> None:
     if user_settings.retrieval.rerank_model:
         settings.rerank_model = user_settings.retrieval.rerank_model
 
+    # Tools settings
+    if user_settings.tools.tavily_api_key:
+        settings.tavily_api_key = user_settings.tools.tavily_api_key
+
     # Reset singleton services so they pick up new config
     import app.services.llm_service as llm_mod
     llm_mod._llm_service = None
@@ -133,6 +145,7 @@ class SettingsResponse(BaseModel):
     llm: LLMConfig
     embedding: EmbeddingConfig
     retrieval: RetrievalConfig
+    tools: ToolsConfig
 
 
 @router.get("/settings", response_model=SettingsResponse)
@@ -145,6 +158,7 @@ async def get_user_settings(
         llm=s.llm,
         embedding=s.embedding,
         retrieval=s.retrieval,
+        tools=s.tools,
     )
 
 
@@ -153,11 +167,12 @@ async def update_user_settings(
     payload: UserSettings,
     _user: TokenPayload = Depends(get_current_user),
 ):
-    """Update LLM, embedding, and retrieval configuration."""
+    """Update LLM, embedding, retrieval, and tools configuration."""
     _save_settings(payload)
     s = _load_settings()
     return SettingsResponse(
         llm=s.llm,
         embedding=s.embedding,
         retrieval=s.retrieval,
+        tools=s.tools,
     )

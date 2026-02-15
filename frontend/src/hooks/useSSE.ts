@@ -13,10 +13,30 @@ export interface SSEImageRef {
   page?: number
 }
 
+export interface SSEToolCall {
+  name: string
+  arguments: Record<string, unknown>
+}
+
+export interface SSEToolResult {
+  name: string
+  result: string
+}
+
+export interface SSESubAgentEvent {
+  type: 'tool_call' | 'tool_result' | 'content'
+  tool_call?: SSEToolCall
+  tool_result?: SSEToolResult
+  content?: string
+}
+
 interface UseSSEOptions {
   onMessage: (data: string) => void
   onSources?: (sources: SSESource[]) => void
   onImages?: (images: SSEImageRef[]) => void
+  onToolCall?: (toolCall: SSEToolCall) => void
+  onToolResult?: (toolResult: SSEToolResult) => void
+  onSubAgentEvent?: (event: SSESubAgentEvent) => void
   onError?: (error: Error) => void
   onComplete?: () => void
 }
@@ -76,7 +96,13 @@ export function useSSE() {
               } else {
                 try {
                   const parsed = JSON.parse(data)
-                  if (parsed.images) {
+                  if (parsed.sub_agent_event) {
+                    options.onSubAgentEvent?.(parsed.sub_agent_event)
+                  } else if (parsed.tool_call) {
+                    options.onToolCall?.(parsed.tool_call)
+                  } else if (parsed.tool_result) {
+                    options.onToolResult?.(parsed.tool_result)
+                  } else if (parsed.images) {
                     options.onImages?.(parsed.images)
                   } else if (parsed.sources) {
                     options.onSources?.(parsed.sources)
@@ -100,7 +126,13 @@ export function useSSE() {
           } else if (data) {
             try {
               const parsed = JSON.parse(data)
-              if (parsed.images) {
+              if (parsed.sub_agent_event) {
+                options.onSubAgentEvent?.(parsed.sub_agent_event)
+              } else if (parsed.tool_call) {
+                options.onToolCall?.(parsed.tool_call)
+              } else if (parsed.tool_result) {
+                options.onToolResult?.(parsed.tool_result)
+              } else if (parsed.images) {
                 options.onImages?.(parsed.images)
               } else if (parsed.sources) {
                 options.onSources?.(parsed.sources)

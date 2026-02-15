@@ -2,8 +2,17 @@ import { useState, useCallback, useEffect, useRef } from 'react'
 import { useAuth } from '@/contexts/AuthContext'
 import { apiFetch, apiStreamUrl } from '@/lib/api'
 import { useSSE } from './useSSE'
-import type { SSESource, SSEImageRef } from './useSSE'
+import type { SSESource, SSEImageRef, SSEToolCall, SSEToolResult, SSESubAgentEvent } from './useSSE'
 import type { Thread, Message, Attachment } from '@/types/chat'
+
+export interface ToolStep {
+  type: 'call' | 'result'
+  name: string
+  arguments?: Record<string, unknown>
+  result?: string
+  subSteps?: ToolStep[]
+  subContent?: string
+}
 
 interface ThreadWithMessages {
   id: string
@@ -19,6 +28,7 @@ export function useChat() {
   const [streamingContent, setStreamingContent] = useState('')
   const [streamingSources, setStreamingSources] = useState<SSESource[]>([])
   const [streamingImages, setStreamingImages] = useState<SSEImageRef[]>([])
+  const [streamingToolSteps, setStreamingToolSteps] = useState<ToolStep[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -48,6 +58,7 @@ export function useChat() {
       setStreamingContent('')
       setStreamingSources([])
       setStreamingImages([])
+      setStreamingToolSteps([])
       setLoading(true)
 
       const fetchId = ++fetchIdRef.current
@@ -128,6 +139,7 @@ export function useChat() {
       setStreamingContent('')
       setStreamingSources([])
       setStreamingImages([])
+      setStreamingToolSteps([])
 
       const url = apiStreamUrl(`/api/threads/${activeThreadId}/messages`)
 
@@ -145,6 +157,37 @@ export function useChat() {
           onImages: (images) => {
             setStreamingImages(images)
             streamingImagesRef.current = images
+          },
+          onToolCall: (toolCall: SSEToolCall) => {
+            setStreamingToolSteps((prev) => [...prev, { type: 'call', name: toolCall.name, arguments: toolCall.arguments }])
+          },
+          onToolResult: (toolResult: SSEToolResult) => {
+            setStreamingToolSteps((prev) => [...prev, { type: 'result', name: toolResult.name, result: toolResult.result }])
+          },
+          onSubAgentEvent: (event: SSESubAgentEvent) => {
+            setStreamingToolSteps((prev) => {
+              const updated = [...prev]
+              // Find the last analyze_document call step
+              let parentIdx = -1
+              for (let i = updated.length - 1; i >= 0; i--) {
+                if (updated[i].type === 'call' && updated[i].name === 'analyze_document') {
+                  parentIdx = i
+                  break
+                }
+              }
+              if (parentIdx === -1) return prev
+
+              const parent = { ...updated[parentIdx] }
+              if (event.type === 'tool_call' && event.tool_call) {
+                parent.subSteps = [...(parent.subSteps || []), { type: 'call', name: event.tool_call.name, arguments: event.tool_call.arguments }]
+              } else if (event.type === 'tool_result' && event.tool_result) {
+                parent.subSteps = [...(parent.subSteps || []), { type: 'result', name: event.tool_result.name, result: event.tool_result.result }]
+              } else if (event.type === 'content' && event.content) {
+                parent.subContent = (parent.subContent || '') + event.content
+              }
+              updated[parentIdx] = parent
+              return updated
+            })
           },
           onError: (err) => {
             setError(err.message)
@@ -173,6 +216,7 @@ export function useChat() {
             })
             setStreamingSources([])
             setStreamingImages([])
+            setStreamingToolSteps([])
             streamingImagesRef.current = []
             fetchThreads() // Refresh to get updated title
           },
@@ -193,6 +237,7 @@ export function useChat() {
     streamingContent,
     streamingSources,
     streamingImages,
+    streamingToolSteps,
     loading,
     error,
     isStreaming,

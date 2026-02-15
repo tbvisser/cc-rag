@@ -25,10 +25,15 @@ interface RetrievalConfig {
   rerank_model: string
 }
 
+interface ToolsConfig {
+  tavily_api_key: string
+}
+
 interface SettingsData {
   llm: LLMConfig
   embedding: EmbeddingConfig
   retrieval: RetrievalConfig
+  tools: ToolsConfig
 }
 
 export default function Settings() {
@@ -38,9 +43,11 @@ export default function Settings() {
   const [llm, setLlm] = useState<LLMConfig>({ model_name: '', base_url: '', api_key: '' })
   const [embedding, setEmbedding] = useState<EmbeddingConfig>({ model_name: '', base_url: '', api_key: '', dimensions: 1536 })
   const [retrieval, setRetrieval] = useState<RetrievalConfig>({ search_mode: 'hybrid', hybrid_alpha: 0.5, rerank_enabled: false, rerank_api_key: '', rerank_model: 'rerank-v3.5' })
+  const [tools, setTools] = useState<ToolsConfig>({ tavily_api_key: '' })
   const [showLlmKey, setShowLlmKey] = useState(false)
   const [showEmbeddingKey, setShowEmbeddingKey] = useState(false)
   const [showRerankKey, setShowRerankKey] = useState(false)
+  const [showTavilyKey, setShowTavilyKey] = useState(false)
   const [saving, setSaving] = useState(false)
   const [loading, setLoading] = useState(true)
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
@@ -52,6 +59,7 @@ export default function Settings() {
         setLlm(data.llm)
         setEmbedding(data.embedding)
         if (data.retrieval) setRetrieval(data.retrieval)
+        if (data.tools) setTools(data.tools)
       })
       .catch(() => {
         // Use defaults if settings endpoint fails
@@ -66,11 +74,12 @@ export default function Settings() {
     try {
       const data = await apiFetch<SettingsData>('/api/settings', {
         method: 'PUT',
-        body: JSON.stringify({ llm, embedding, retrieval }),
+        body: JSON.stringify({ llm, embedding, retrieval, tools }),
       }, token)
       setLlm(data.llm)
       setEmbedding(data.embedding)
       if (data.retrieval) setRetrieval(data.retrieval)
+      if (data.tools) setTools(data.tools)
       setMessage({ type: 'success', text: 'Settings saved successfully.' })
     } catch (err) {
       setMessage({ type: 'error', text: err instanceof Error ? err.message : 'Failed to save settings.' })
@@ -87,6 +96,7 @@ export default function Settings() {
         setLlm(data.llm)
         setEmbedding(data.embedding)
         if (data.retrieval) setRetrieval(data.retrieval)
+        if (data.tools) setTools(data.tools)
         setMessage(null)
       })
       .finally(() => setLoading(false))
@@ -195,6 +205,23 @@ export default function Settings() {
                 />
               </>
             )}
+          </div>
+        </section>
+
+        <hr className="my-8" />
+
+        {/* Tools Configuration */}
+        <section>
+          <h2 className="text-base font-semibold">Tools Configuration</h2>
+          <p className="mt-1 text-sm text-muted-foreground">Configure API keys for additional tools available in the chat.</p>
+          <div className="mt-4 space-y-4">
+            <PasswordField
+              label="Tavily API Key (Web Search)"
+              value={tools.tavily_api_key}
+              onChange={(v) => setTools({ ...tools, tavily_api_key: v })}
+              show={showTavilyKey}
+              onToggle={() => setShowTavilyKey((p) => !p)}
+            />
           </div>
         </section>
 

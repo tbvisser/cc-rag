@@ -4,7 +4,9 @@ import remarkGfm from 'remark-gfm'
 import { cn } from '@/lib/utils'
 import { Bot, FileText, ImageIcon } from 'lucide-react'
 import type { SSESource, SSEImageRef } from '@/hooks/useSSE'
+import type { ToolStep } from '@/hooks/useChat'
 import { AuthenticatedImage } from './AuthenticatedImage'
+import { ToolCallCards } from './ToolCallCard'
 
 import type { Message, Attachment } from '@/types/chat'
 
@@ -13,11 +15,12 @@ interface MessageListProps {
   streamingContent?: string
   streamingSources?: SSESource[]
   streamingImages?: SSEImageRef[]
+  streamingToolSteps?: ToolStep[]
   isStreaming?: boolean
   userInitials?: string
 }
 
-export function MessageList({ messages, streamingContent, streamingSources, streamingImages, isStreaming, userInitials }: MessageListProps) {
+export function MessageList({ messages, streamingContent, streamingSources, streamingImages, streamingToolSteps, isStreaming, userInitials }: MessageListProps) {
   const bottomRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -53,6 +56,9 @@ export function MessageList({ messages, streamingContent, streamingSources, stre
             </div>
           )
         })}
+        {streamingToolSteps && streamingToolSteps.length > 0 && (
+          <ToolCallCards steps={streamingToolSteps} />
+        )}
         {showThinking && <ThinkingIndicator />}
         {streamingContent && (
           <>

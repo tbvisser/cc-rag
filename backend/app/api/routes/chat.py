@@ -1,7 +1,6 @@
 import base64
 import json
 import logging
-import re
 import uuid
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status
 from fastapi.responses import Response
@@ -18,27 +17,29 @@ from app.services.supabase_service import SupabaseService, get_supabase_service
 from app.services.storage_service import StorageService, get_storage_service
 from app.services.llm_service import LLMService, get_llm_service
 from app.services.embedding_service import EmbeddingService, get_embedding_service
-from app.services.retrieval_service import RetrievalService, format_context
+from app.services.agent_service import (
+    AgentContext,
+    run_agent_loop,
+    ToolCallEvent,
+    ToolResultEvent,
+    SourcesEvent,
+    ImagesEvent,
+    SubAgentEvent,
+)
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# Base system prompt
-BASE_SYSTEM_PROMPT = """You are a helpful AI assistant with access to the user's uploaded documents.
-Answer questions based on the provided context when available. If the context doesn't contain
-relevant information, use your general knowledge and let the user know.
-Be concise and helpful. Cite source documents when using retrieved context."""
+SYSTEM_PROMPT = """You are a helpful AI assistant with access to tools for searching the user's uploaded documents, querying document metadata via SQL, and searching the web.
 
-RAG_CONTEXT_TEMPLATE = """{base_prompt}
+Use the available tools when appropriate:
+- retrieve_documents: Search uploaded document content for relevant information
+- text_to_sql: Query document metadata (counts, types, topics, dates, etc.)
+- web_search: Search the web for current information (when configured)
+- analyze_document: Analyze an entire document in depth (summaries, themes, structure). Use this when the user asks about a whole document, NOT for simple fact-finding.
 
-## Retrieved Context
-
-The following excerpts were retrieved from the user's documents and may be relevant to their question:
-
-{context}
-
-Use the above context to inform your answer. Cite the source when you use information from it."""
+You may call multiple tools if needed. Be concise and helpful. Cite sources when using retrieved context."""
 
 
 @router.post("/threads", response_model=ThreadResponse)
@@ -166,7 +167,7 @@ async def send_message(
     llm: LLMService = Depends(get_llm_service),
     embedding_service: EmbeddingService = Depends(get_embedding_service),
 ):
-    """Send a message and stream the assistant's response with RAG."""
+    """Send a message and stream the assistant's response via agent loop."""
     # Verify thread ownership
     thread = await supabase.get_thread(thread_id, user.sub)
     if not thread:
@@ -194,88 +195,6 @@ async def send_message(
         except Exception:
             pass  # Title generation is not critical
 
-    # Retrieve relevant context from user's documents
-    retrieval = RetrievalService(embedding_service, supabase)
-    try:
-        chunks = await retrieval.retrieve(
-            query=message.content,
-            user_id=user.sub,
-            metadata_filter=message.metadata_filter,
-        )
-    except Exception as e:
-        logger.warning("Retrieval failed, proceeding without context: %s", e)
-        chunks = []
-
-    # Build system prompt with or without RAG context
-    image_refs = []
-    if chunks:
-        context_str = format_context(chunks)
-
-        # Collect all document image references from retrieved chunks
-        all_image_refs = []
-        seen_docs = set()
-        for chunk in chunks:
-            doc_id = chunk.get("document_id")
-            if not doc_id or doc_id in seen_docs:
-                continue
-            seen_docs.add(doc_id)
-            doc = await supabase.get_document(doc_id, user.sub)
-            if doc and doc.get("metadata", {}).get("images"):
-                for img in doc["metadata"]["images"]:
-                    fname = chunk.get("filename", "document")
-                    all_image_refs.append({
-                        "url": f"/api/documents/{doc_id}/images/{img['index']}",
-                        "alt": f"Image {img['index']} from {fname}",
-                        "doc_id": doc_id,
-                        "index": img["index"],
-                        "page": img.get("page"),
-                    })
-
-        # Use LLM to filter images to only those relevant to the user's question
-        if all_image_refs:
-            image_list = "\n".join(
-                f"{i}: {ref['alt']}" + (f" (page {ref['page']})" if ref.get("page") is not None else "")
-                for i, ref in enumerate(all_image_refs)
-            )
-            try:
-                filter_response = llm.chat_completion(
-                    messages=[{"role": "user", "content": message.content}],
-                    system_prompt=(
-                        "The user asked a question about a document. Below is a numbered list of images "
-                        "extracted from that document. Return ONLY the comma-separated numbers of images "
-                        "that are relevant to the user's question. If none are relevant, return \"none\".\n\n"
-                        f"Images:\n{image_list}"
-                    ),
-                    max_tokens=50,
-                )
-                filter_text = filter_response.strip().lower()
-                if filter_text != "none":
-                    selected = [int(x) for x in re.findall(r"\d+", filter_text)]
-                    image_refs = [all_image_refs[i] for i in selected if i < len(all_image_refs)]
-                # If "none" or parsing fails, image_refs stays empty
-            except Exception:
-                logger.warning("Image filtering failed, including all images")
-                image_refs = all_image_refs
-
-        if image_refs:
-            image_descriptions = []
-            for ref in image_refs:
-                desc = f"- {ref['alt']}"
-                if ref.get("page") is not None:
-                    desc += f" (page {ref['page']})"
-                image_descriptions.append(desc)
-            context_str += "\n\n## Document Images Available\n\n"
-            context_str += "The following images were extracted from the retrieved documents and will be shown to the user automatically:\n"
-            context_str += "\n".join(image_descriptions)
-            context_str += "\n\nYou may reference these images in your answer (e.g. 'as shown in the image from page 3') but do NOT try to reproduce image URLs or markdown image syntax."
-
-        system_prompt = RAG_CONTEXT_TEMPLATE.format(
-            base_prompt=BASE_SYSTEM_PROMPT,
-            context=context_str,
-        )
-    else:
-        system_prompt = BASE_SYSTEM_PROMPT
-
     # Get all messages for this thread to build conversation history
     db_messages = await supabase.get_messages(thread_id)
 
@@ -286,7 +205,6 @@ async def send_message(
         image_attachments = [a for a in attachments if a.get("type") == "image"]
 
         if image_attachments and msg["role"] == "user":
-            # Build multimodal content array
             content_parts = [{"type": "text", "text": msg["content"]}]
             for att in image_attachments:
                 try:
@@ -302,38 +220,55 @@ async def send_message(
         else:
             chat_messages.append({"role": msg["role"], "content": msg["content"]})
 
+    # Build agent context
+    ctx = AgentContext(
+        user_id=user.sub,
+        query=message.content,
+        chat_messages=chat_messages,
+        system_prompt=SYSTEM_PROMPT,
+        llm=llm,
+        embedding_service=embedding_service,
+        supabase=supabase,
+        metadata_filter=message.metadata_filter,
+    )
+
     async def event_generator():
         full_response = ""
         try:
-            # Send sources metadata to frontend before streaming
-            if chunks:
-                sources = [
-                    {"filename": c.get("filename", "Unknown"), "similarity": c.get("similarity", 0)}
-                    for c in chunks
-                ]
-                yield {"data": json.dumps({"sources": sources})}
-
-            # Send document image references to frontend
-            if image_refs:
-                yield {"data": json.dumps({"images": image_refs})}
-
-            async for chunk in llm.chat_completion_stream(
-                messages=chat_messages,
-                system_prompt=system_prompt,
-            ):
-                full_response += chunk
-                yield {"data": json.dumps({"content": chunk})}
+            async for event in run_agent_loop(ctx):
+                if isinstance(event, SubAgentEvent):
+                    inner = event.inner
+                    if isinstance(inner, ToolCallEvent):
+                        yield {"data": json.dumps({"sub_agent_event": {"type": "tool_call", "tool_call": {"name": inner.name, "arguments": inner.arguments}}})}
+                    elif isinstance(inner, ToolResultEvent):
+                        display_result = inner.result[:2000] + "..." if len(inner.result) > 2000 else inner.result
+                        yield {"data": json.dumps({"sub_agent_event": {"type": "tool_result", "tool_result": {"name": inner.name, "result": display_result}}})}
+                    elif isinstance(inner, str):
+                        yield {"data": json.dumps({"sub_agent_event": {"type": "content", "content": inner}})}
+                elif isinstance(event, ToolCallEvent):
+                    yield {"data": json.dumps({"tool_call": {"name": event.name, "arguments": event.arguments}})}
+                elif isinstance(event, ToolResultEvent):
+                    # Truncate long results for the SSE event (full result stays in LLM context)
+                    display_result = event.result[:2000] + "..." if len(event.result) > 2000 else event.result
+                    yield {"data": json.dumps({"tool_result": {"name": event.name, "result": display_result}})}
+                elif isinstance(event, SourcesEvent):
+                    yield {"data": json.dumps({"sources": event.sources})}
+                elif isinstance(event, ImagesEvent):
+                    yield {"data": json.dumps({"images": event.images})}
+                elif isinstance(event, str):
+                    full_response += event
+                    yield {"data": json.dumps({"content": event})}
 
             # Build attachments for assistant message (document images)
             assistant_attachments = None
-            if image_refs:
+            if ctx.image_refs:
                 assistant_attachments = [
                     {
                         "type": "document_image",
                         "url": ref["url"],
                         "alt": ref["alt"],
                     }
-                    for ref in image_refs
+                    for ref in ctx.image_refs
                 ]
 
             # Save assistant message to database
@@ -346,6 +281,7 @@ async def send_message(
 
             yield {"data": "[DONE]"}
         except Exception as e:
+            logger.error("Agent loop error: %s", e)
             yield {"data": json.dumps({"error": str(e)})}
 
     return EventSourceResponse(event_generator())
