@@ -9,15 +9,20 @@ RETRIEVE_DOCUMENTS = {
         "name": "retrieve_documents",
         "description": (
             "Search the user's uploaded documents for relevant information. "
-            "Use this when the user asks about content they've uploaded or when "
-            "you need to find specific information from their documents."
+            "ALWAYS use this tool when the user asks ANY question that could relate to their documents. "
+            "Do not skip retrieval and answer from your own knowledge. "
+            "You can call this tool multiple times with different queries to find more information. "
+            "Use specific keywords and noun phrases rather than full conversational questions as the query."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "The search query to find relevant document chunks.",
+                    "description": (
+                        "Search query using specific keywords or noun phrases (e.g. 'pricing tiers enterprise' "
+                        "instead of 'what does it say about pricing?'). Be specific and focused."
+                    ),
                 }
             },
             "required": ["query"],

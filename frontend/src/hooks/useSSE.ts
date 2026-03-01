@@ -8,6 +8,7 @@ export interface SSESource {
 export interface SSEImageRef {
   url: string
   alt: string
+  label?: string
   doc_id: string
   index: number
   page?: number

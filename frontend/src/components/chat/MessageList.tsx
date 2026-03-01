@@ -6,6 +6,7 @@ import { Bot, FileText, ImageIcon } from 'lucide-react'
 import type { SSESource, SSEImageRef } from '@/hooks/useSSE'
 import type { ToolStep } from '@/hooks/useChat'
 import { AuthenticatedImage } from './AuthenticatedImage'
+import { MermaidDiagram } from './MermaidDiagram'
 import { ToolCallCards } from './ToolCallCard'
 
 import type { Message, Attachment } from '@/types/chat'
@@ -75,7 +76,7 @@ export function MessageList({ messages, streamingContent, streamingSources, stre
               isStreaming
             />
             {streamingImages && streamingImages.length > 0 && (
-              <DocumentImages images={streamingImages.map((img) => ({ type: 'document_image', url: img.url, alt: img.alt }))} />
+              <DocumentImages images={streamingImages.map((img) => ({ type: 'document_image', url: img.url, alt: img.alt, label: img.label }))} />
             )}
           </>
         )}
@@ -130,14 +131,22 @@ function DocumentImages({ images }: { images: Attachment[] }) {
         <ImageIcon className="h-3 w-3" />
         Document images
       </span>
-      <div className="flex flex-wrap gap-2">
+      <div className="flex flex-wrap gap-3">
         {images.map((img, i) => (
-          <AuthenticatedImage
-            key={i}
-            src={img.url}
-            alt={img.alt || `Document image ${i + 1}`}
-            className="h-40 w-40 rounded-md object-cover border"
-          />
+          <div key={i} className="flex flex-col items-start gap-1">
+            <AuthenticatedImage
+              src={img.url}
+              alt={img.alt || `Document image ${i + 1}`}
+              className="max-h-60 max-w-xs rounded-md object-contain border"
+            />
+            {(img.label || img.alt) && (
+              <span className="text-xs text-muted-foreground max-w-xs">
+                {img.label && <strong>{img.label}</strong>}
+                {img.label && img.alt && ': '}
+                {img.alt}
+              </span>
+            )}
+          </div>
         ))}
       </div>
     </div>
@@ -196,6 +205,13 @@ function MessageBubble({
                     className="max-w-full rounded-lg my-2"
                   />
                 ),
+                code: ({ className, children, ...props }) => {
+                  if (className === 'language-mermaid') {
+                    const code = String(children).replace(/\n$/, '')
+                    return <MermaidDiagram code={code} />
+                  }
+                  return <code className={className} {...props}>{children}</code>
+                },
               }}
             >
               {message.content}

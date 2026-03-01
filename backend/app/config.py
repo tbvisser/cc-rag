@@ -26,6 +26,11 @@ class Settings(BaseSettings):
     chunk_size: int = 1000
     chunk_overlap: int = 200
 
+    # Retrieval
+    retrieval_threshold: float = 0.3
+    retrieval_limit: int = 10
+    query_rewrite_enabled: bool = True
+
     # Hybrid Search
     search_mode: str = "hybrid"  # "vector" | "keyword" | "hybrid"
     hybrid_alpha: float = 0.5  # 0.0 = keyword only, 1.0 = vector only
@@ -37,6 +42,11 @@ class Settings(BaseSettings):
     rerank_api_key: str = ""
     rerank_model: str = "rerank-v3.5"
     rerank_top_n: int = 5
+
+    # Image Descriptions (vision LLM during ingestion)
+    image_description_enabled: bool = True
+    image_similarity_min_ratio: float = 0.6  # image chunk must score ≥ 60% of top chunk
+    image_max_results: int = 3  # max images per retrieval
 
     # Web Search (Tavily)
     tavily_api_key: str = ""

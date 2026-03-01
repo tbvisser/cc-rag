@@ -18,6 +18,8 @@ from app.services.supabase_service import SupabaseService
 from app.services.chunking_service import chunk_text
 from app.services.embedding_service import EmbeddingService
 from app.services.metadata_extraction_service import extract_metadata
+from app.services.image_description_service import describe_image
+from app.services.llm_service import get_llm_service
 
 logger = logging.getLogger(__name__)
 
@@ -157,10 +159,13 @@ async def process_document(
             raise ValueError("No text content could be extracted from the file")
         logger.info("Document %s: extracted %d chars of text, %d images", document_id, len(text), len(images))
 
-        # Upload extracted images to storage
+        # Upload extracted images to storage and generate descriptions
+        settings = get_settings()
         image_metadata_list = []
+        image_description_chunks = []
         if images:
             await storage.ensure_images_bucket()
+            llm = get_llm_service()
             for img in images:
                 image_name = f"{img['index']}.png"
                 storage_path = await storage.upload_image(
@@ -170,12 +175,31 @@ async def process_document(
                     content=img["png_bytes"],
                     content_type="image/png",
                 )
-                image_metadata_list.append({
+                img_meta = {
                     "storage_path": storage_path,
                     "index": img["index"],
                     "page": img["page"],
-                })
+                }
+
+                # Generate image description via vision LLM
+                if settings.image_description_enabled:
+                    description = describe_image(img["png_bytes"], img["page"], llm)
+                    img_meta["description"] = description
+                    page_label = f"Page {img['page']}" if img["page"] else "Unknown page"
+                    chunk_content = f"[Document Image — {page_label}]\n{description}"
+                    image_description_chunks.append({
+                        "content": chunk_content,
+                        "metadata": {
+                            "chunk_type": "image_description",
+                            "image_index": img["index"],
+                            "image_page": img["page"],
+                        },
+                    })
+
+                image_metadata_list.append(img_meta)
             logger.info("Document %s: uploaded %d images to storage", document_id, len(image_metadata_list))
+            if image_description_chunks:
+                logger.info("Document %s: generated %d image description chunks", document_id, len(image_description_chunks))
 
         # Extract metadata using LLM
         metadata = extract_metadata(text, doc["filename"])
@@ -198,33 +222,62 @@ async def process_document(
             document_id, len(chunks),
         )
 
-        # Generate embeddings
-        embeddings = await embedding_service.embed_chunks(chunks)
+        # Build contextual prefix for embeddings (improves retrieval quality)
+        prefix_parts = []
+        if metadata.title:
+            prefix_parts.append(f"Document: {metadata.title}")
+        if metadata.summary:
+            prefix_parts.append(f"Summary: {metadata.summary}")
+        prefix = "\n".join(prefix_parts) + "\n---\n" if prefix_parts else ""
 
-        # Store chunks with embeddings in database
-        chunk_metadata = {
+        # Combine text chunks and image description chunks for embedding
+        all_chunks = []
+        all_embedding_texts = []
+        base_metadata = {
             "document_type": metadata.document_type,
             "topics": metadata.topics,
             "language": metadata.language,
         }
-        chunk_records = [
-            {
+
+        # Text chunks
+        for i, chunk_content in enumerate(chunks):
+            all_chunks.append({
                 "document_id": document_id,
                 "content": chunk_content,
                 "chunk_index": i,
-                "embedding": embedding,
-                "metadata": chunk_metadata,
-            }
-            for i, (chunk_content, embedding) in enumerate(zip(chunks, embeddings))
+                "metadata": base_metadata,
+            })
+            all_embedding_texts.append((prefix + chunk_content) if prefix else chunk_content)
+
+        # Image description chunks (appended after text chunks)
+        for img_chunk in image_description_chunks:
+            idx = len(all_chunks)
+            all_chunks.append({
+                "document_id": document_id,
+                "content": img_chunk["content"],
+                "chunk_index": idx,
+                "metadata": {**base_metadata, **img_chunk["metadata"]},
+            })
+            all_embedding_texts.append((prefix + img_chunk["content"]) if prefix else img_chunk["content"])
+
+        # Generate embeddings for all chunks
+        embeddings = await embedding_service.embed_chunks(all_embedding_texts)
+
+        # Store chunks with embeddings in database
+        chunk_records = [
+            {**chunk, "embedding": emb}
+            for chunk, emb in zip(all_chunks, embeddings)
         ]
         await supabase.create_chunks(chunk_records)
 
+        total_chunks = len(all_chunks)
         # Mark as completed
         await supabase.update_document_status(
-            document_id, "completed", chunk_count=len(chunks)
+            document_id, "completed", chunk_count=total_chunks
         )
 
-        logger.info("Document %s: ingestion complete (%d chunks)", document_id, len(chunks))
+        logger.info("Document %s: ingestion complete (%d text + %d image = %d chunks)",
+                     document_id, len(chunks), len(image_description_chunks), total_chunks)
 
     except Exception as e:
         logger.error("Document %s: ingestion failed - %s", document_id, str(e), exc_info=True)

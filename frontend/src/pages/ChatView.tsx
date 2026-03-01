@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useCallback, useRef, useState } from 'react'
 import { useParams, useSearchParams, useNavigate } from 'react-router-dom'
 import { MessageList } from '@/components/chat/MessageList'
 import { MessageInput } from '@/components/chat/MessageInput'
@@ -44,13 +44,20 @@ export default function ChatView() {
     clearError,
   } = useChat()
 
-  // Load thread when threadId changes
+  // Stable ref for selectThread to avoid re-firing when function reference changes
+  const selectThreadRef = useRef(selectThread)
+  selectThreadRef.current = selectThread
+
+  // Load thread when threadId changes (not when selectThread reference changes)
   useEffect(() => {
     if (threadId) {
       promptHandled.current = false
-      selectThread(threadId)
+      // Reset so auto-send only responds to fetchThread's loading transition,
+      // not a stale transition from createThread.
+      prevLoadingRef.current = false
+      selectThreadRef.current(threadId)
     }
-  }, [threadId, selectThread])
+  }, [threadId])
 
   // Auto-send prompt from query param — only after thread loading finishes
   useEffect(() => {

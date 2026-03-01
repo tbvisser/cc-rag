@@ -10,7 +10,6 @@ Flow:
 
 import json
 import logging
-import re
 from dataclasses import dataclass, field
 from typing import AsyncGenerator
 
@@ -76,20 +75,65 @@ class AgentContext:
     image_refs: list[dict] = field(default_factory=list)
 
 
+async def _rewrite_query(llm: LLMService, query: str, chat_messages: list[dict]) -> list[str]:
+    """Use the LLM to rewrite a conversational query into 1-3 focused search queries."""
+    # Build a compact conversation context (last few messages)
+    recent = chat_messages[-6:] if len(chat_messages) > 6 else chat_messages
+    conversation = "\n".join(
+        f"{m['role'].upper()}: {m['content'] if isinstance(m['content'], str) else m['content'][0].get('text', '')}"
+        for m in recent
+    )
+
+    try:
+        response = llm.chat_completion(
+            messages=[{"role": "user", "content": conversation}],
+            system_prompt=(
+                "Given the conversation above, rewrite the user's latest message into 1-3 focused search queries "
+                "for a vector similarity search over document chunks. Resolve pronouns and references using "
+                "conversation context. Extract specific keywords and noun phrases. "
+                "Return ONLY the queries, one per line. No numbering, no explanation."
+            ),
+            max_tokens=150,
+        )
+        queries = [q.strip() for q in response.strip().split("\n") if q.strip()]
+        return queries[:3] if queries else [query]
+    except Exception:
+        logger.warning("Query rewriting failed, using original query")
+        return [query]
+
+
 async def _execute_retrieve(ctx: AgentContext, arguments: dict) -> str:
     """Execute the retrieve_documents tool."""
     query = arguments.get("query", ctx.query)
     retrieval = RetrievalService(ctx.embedding_service, ctx.supabase)
+    settings = get_settings()
 
-    try:
-        chunks = await retrieval.retrieve(
-            query=query,
-            user_id=ctx.user_id,
-            metadata_filter=ctx.metadata_filter,
-        )
-    except Exception as e:
-        logger.warning("Retrieval failed: %s", e)
-        return "Retrieval failed — no documents found."
+    # Query rewriting: generate multiple focused queries
+    if settings.query_rewrite_enabled:
+        queries = await _rewrite_query(ctx.llm, query, ctx.chat_messages)
+        logger.info("Rewritten queries: %s", queries)
+    else:
+        queries = [query]
+
+    # Run retrieval for each query and merge results
+    all_chunks: dict[str, dict] = {}  # chunk_id -> chunk (keep highest similarity)
+    for q in queries:
+        try:
+            chunks = await retrieval.retrieve(
+                query=q,
+                user_id=ctx.user_id,
+                metadata_filter=ctx.metadata_filter,
+            )
+            for chunk in chunks:
+                chunk_id = chunk["id"]
+                if chunk_id not in all_chunks or chunk.get("similarity", 0) > all_chunks[chunk_id].get("similarity", 0):
+                    all_chunks[chunk_id] = chunk
+        except Exception as e:
+            logger.warning("Retrieval failed for query '%s': %s", q, e)
+
+    # Sort by similarity descending and apply limit
+    chunks = sorted(all_chunks.values(), key=lambda c: c.get("similarity", 0), reverse=True)
+    chunks = chunks[:settings.retrieval_limit]
 
     if not chunks:
         return "No relevant documents found."
@@ -100,64 +144,60 @@ async def _execute_retrieve(ctx: AgentContext, arguments: dict) -> str:
         for c in chunks
     ]
 
-    # Collect document images
-    all_image_refs = []
-    seen_docs = set()
+    # Collect images from image_description chunks (matched by semantic search)
+    # Only include images whose similarity is competitive with the best result
+    top_similarity = chunks[0].get("similarity", 0) if chunks else 0
+    min_image_similarity = top_similarity * settings.image_similarity_min_ratio
+    seen_images = set()
+    figure_num = 0
     for chunk in chunks:
-        doc_id = chunk.get("document_id")
-        if not doc_id or doc_id in seen_docs:
-            continue
-        seen_docs.add(doc_id)
-        doc = await ctx.supabase.get_document(doc_id, ctx.user_id)
-        if doc and doc.get("metadata", {}).get("images"):
-            for img in doc["metadata"]["images"]:
+        chunk_meta = chunk.get("metadata") or {}
+        if chunk_meta.get("chunk_type") == "image_description":
+            similarity = chunk.get("similarity", 0)
+            if similarity < min_image_similarity:
+                continue
+            doc_id = chunk.get("document_id")
+            img_idx = chunk_meta.get("image_index")
+            if doc_id and img_idx is not None and (doc_id, img_idx) not in seen_images:
+                seen_images.add((doc_id, img_idx))
+                figure_num += 1
                 fname = chunk.get("filename", "document")
-                all_image_refs.append({
-                    "url": f"/api/documents/{doc_id}/images/{img['index']}",
-                    "alt": f"Image {img['index']} from {fname}",
+                page = chunk_meta.get("image_page")
+                # Extract short description from chunk content (skip the header line)
+                content = chunk.get("content", "")
+                desc_lines = content.split("\n", 1)
+                description = desc_lines[1].strip()[:120] if len(desc_lines) > 1 else ""
+                label = f"Figure {figure_num}"
+                page_info = f" (page {page})" if page else ""
+                ctx.image_refs.append({
+                    "url": f"/api/documents/{doc_id}/images/{img_idx}",
+                    "alt": f"{label}: {description}" if description else label,
+                    "label": label,
                     "doc_id": doc_id,
-                    "index": img["index"],
-                    "page": img.get("page"),
+                    "index": img_idx,
+                    "page": page,
+                    "source": fname,
                 })
+                if len(ctx.image_refs) >= settings.image_max_results:
+                    break
 
-    # Filter images using LLM
-    if all_image_refs:
-        image_list = "\n".join(
-            f"{i}: {ref['alt']}" + (f" (page {ref['page']})" if ref.get("page") is not None else "")
-            for i, ref in enumerate(all_image_refs)
+    # Log image filtering stats
+    total_image_chunks = sum(1 for c in chunks if (c.get("metadata") or {}).get("chunk_type") == "image_description")
+    if total_image_chunks:
+        logger.info(
+            "Image chunks: %d found, %d passed filters (min_ratio=%.2f, min_sim=%.4f, max=%d)",
+            total_image_chunks, len(ctx.image_refs),
+            settings.image_similarity_min_ratio, min_image_similarity,
+            settings.image_max_results,
         )
-        try:
-            filter_response = ctx.llm.chat_completion(
-                messages=[{"role": "user", "content": ctx.query}],
-                system_prompt=(
-                    "The user asked a question about a document. Below is a numbered list of images "
-                    "extracted from that document. Return ONLY the comma-separated numbers of images "
-                    "that are relevant to the user's question. If none are relevant, return \"none\".\n\n"
-                    f"Images:\n{image_list}"
-                ),
-                max_tokens=50,
-            )
-            filter_text = filter_response.strip().lower()
-            if filter_text != "none":
-                selected = [int(x) for x in re.findall(r"\d+", filter_text)]
-                ctx.image_refs = [all_image_refs[i] for i in selected if i < len(all_image_refs)]
-        except Exception:
-            logger.warning("Image filtering failed, including all images")
-            ctx.image_refs = all_image_refs
 
     context_str = format_context(chunks)
 
     if ctx.image_refs:
-        image_descriptions = []
+        context_str += "\n\n## Attached Figures\n\n"
         for ref in ctx.image_refs:
-            desc = f"- {ref['alt']}"
-            if ref.get("page") is not None:
-                desc += f" (page {ref['page']})"
-            image_descriptions.append(desc)
-        context_str += "\n\n## Document Images Available\n\n"
-        context_str += "The following images were extracted from the retrieved documents and will be shown to the user automatically:\n"
-        context_str += "\n".join(image_descriptions)
-        context_str += "\n\nYou may reference these images in your answer but do NOT try to reproduce image URLs."
+            context_str += f"- **{ref['label']}** — {ref['source']}, p.{ref.get('page', '?')}: {ref['alt']}\n"
+        context_str += "\nThese figures are displayed below your answer. Reference relevant ones by label (e.g. 'see **Figure 1**'). Do NOT describe figures the user can already see — just refer to them. Do NOT include image URLs."
 
     return context_str
 

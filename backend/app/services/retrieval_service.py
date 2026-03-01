@@ -58,8 +58,8 @@ class RetrievalService:
         self,
         query: str,
         user_id: str,
-        limit: int = 5,
-        threshold: float = 0.7,
+        limit: int | None = None,
+        threshold: float | None = None,
         metadata_filter: dict | None = None,
     ) -> list[dict]:
         """
@@ -71,59 +71,22 @@ class RetrievalService:
         - "hybrid": combines vector + keyword via Reciprocal Rank Fusion
 
         Optionally reranks results via Cohere cross-encoder API.
+        Falls back to threshold=0.0 if initial search returns no results.
         """
         settings = get_settings()
+        if limit is None:
+            limit = settings.retrieval_limit
+        if threshold is None:
+            threshold = settings.retrieval_threshold
         search_mode = settings.search_mode
         candidate_limit = settings.hybrid_candidate_limit
 
-        vector_results = []
-        keyword_results = []
+        results = await self._search(query, user_id, limit, threshold, metadata_filter, settings)
 
-        # Vector search
-        if search_mode in ("vector", "hybrid"):
-            query_embedding = await self.embedding_service.embed_text(query)
-            vector_results = await self.supabase.search_chunks(
-                user_id=user_id,
-                embedding=query_embedding,
-                limit=candidate_limit if search_mode == "hybrid" else limit,
-                threshold=threshold,
-                filter_metadata=metadata_filter,
-            )
-
-        # Keyword search
-        if search_mode in ("keyword", "hybrid"):
-            keyword_results = await self.supabase.search_chunks_keyword(
-                user_id=user_id,
-                query_text=query,
-                limit=candidate_limit if search_mode == "hybrid" else limit,
-            )
-
-        # Combine results based on mode
-        if search_mode == "hybrid":
-            results = reciprocal_rank_fusion(
-                vector_results=vector_results,
-                keyword_results=keyword_results,
-                alpha=settings.hybrid_alpha,
-                k=settings.rrf_k,
-            )
-        elif search_mode == "keyword":
-            # Map keyword 'rank' to 'similarity' for consistent downstream use
-            for r in keyword_results:
-                r["similarity"] = r.get("rank", 0.0)
-            results = keyword_results
-        else:
-            results = vector_results
-
-        # Rerank if enabled
-        if settings.rerank_enabled:
-            results = await self.reranking_service.rerank(
-                query=query,
-                chunks=results,
-                top_n=settings.rerank_top_n,
-            )
-
-        # Trim to final limit
-        results = results[:limit]
+        # Fallback: if no results, retry with no threshold to get nearest neighbors
+        if not results and threshold > 0.0 and search_mode in ("vector", "hybrid"):
+            logger.info("No results at threshold=%.2f, retrying with threshold=0.0", threshold)
+            results = await self._search(query, user_id, limit, 0.0, metadata_filter, settings)
 
         if not results:
             logger.info("No chunks found for query (user=%s, mode=%s)", user_id, search_mode)
@@ -149,6 +112,73 @@ class RetrievalService:
         )
 
         return results
+
+    async def _search(
+        self,
+        query: str,
+        user_id: str,
+        limit: int,
+        threshold: float,
+        metadata_filter: dict | None,
+        settings,
+    ) -> list[dict]:
+        """Run the configured search mode and return merged/reranked results."""
+        search_mode = settings.search_mode
+        candidate_limit = settings.hybrid_candidate_limit
+
+        vector_results = []
+        keyword_results = []
+
+        # Vector search
+        if search_mode in ("vector", "hybrid"):
+            try:
+                query_embedding = await self.embedding_service.embed_text(query)
+                vector_results = await self.supabase.search_chunks(
+                    user_id=user_id,
+                    embedding=query_embedding,
+                    limit=candidate_limit if search_mode == "hybrid" else limit,
+                    threshold=threshold,
+                    filter_metadata=metadata_filter,
+                )
+            except Exception as e:
+                logger.warning("Vector search failed: %s", e)
+
+        # Keyword search
+        if search_mode in ("keyword", "hybrid"):
+            try:
+                keyword_results = await self.supabase.search_chunks_keyword(
+                    user_id=user_id,
+                    query_text=query,
+                    limit=candidate_limit if search_mode == "hybrid" else limit,
+                )
+            except Exception as e:
+                logger.warning("Keyword search failed: %s", e)
+
+        # Combine results based on mode
+        if search_mode == "hybrid":
+            results = reciprocal_rank_fusion(
+                vector_results=vector_results,
+                keyword_results=keyword_results,
+                alpha=settings.hybrid_alpha,
+                k=settings.rrf_k,
+            )
+        elif search_mode == "keyword":
+            for r in keyword_results:
+                r["similarity"] = r.get("rank", 0.0)
+            results = keyword_results
+        else:
+            results = vector_results
+
+        # Rerank if enabled
+        if settings.rerank_enabled:
+            results = await self.reranking_service.rerank(
+                query=query,
+                chunks=results,
+                top_n=settings.rerank_top_n,
+            )
+
+        # Trim to final limit
+        return results[:limit]
 
 
 def format_context(chunks: list[dict]) -> str:

@@ -9,6 +9,7 @@ export interface Attachment {
   url: string
   storage_path?: string
   alt?: string
+  label?: string
 }
 
 export interface Message {
